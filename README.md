@@ -11,9 +11,9 @@ station lists and time series directly; there is no server and no account.
 
 ## What it does
 
-- **Fetches automatically.** On opening, the page loads the last 30 days for every
-  station inside the area of interest. Pick any other period with the date fields
-  or the 7 / 30 / 90-day buttons, then press **Fetch data**.
+- **Pick a period, press Fetch data.** On opening, the page loads the last 30 days
+  for every station inside the study area. For another period, set the dates (or
+  use the 7 / 30 / 90-day buttons) and press **Fetch data**.
 - **Four variables.** Water level (m above mean sea level, hourly), discharge
   (m³/s, hourly), daily rainfall (mm/day) and hourly rainfall (mm/h).
 - **Checks every series.** Each station is marked OK, Gaps (50–90% of readings),
@@ -24,8 +24,8 @@ station lists and time series directly; there is no server and no account.
   - *Save … CSV* writes the current variable for every station in view.
   - *Station list* writes station metadata with each station's check results.
   - *Save CSV* beside each chart writes that station alone.
-- **Any area of interest.** *Load AOI…* accepts a GeoJSON file or a zipped
-  shapefile in WGS84 (EPSG:4326).
+- **Built-in study area.** The area of interest is part of the site, so the only
+  thing to choose is the period.
 
 ### CSV layout
 

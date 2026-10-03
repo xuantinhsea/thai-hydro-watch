@@ -118,7 +118,6 @@ button, input { font: inherit; color: inherit; }
 .field { display: grid; gap: 4px; min-width: 0; }
 .field > .lbl { font-size: 12px; color: var(--muted); letter-spacing: 0.03em; }
 .field .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.aoi-name { font-weight: 500; }
 input[type="date"] {
   font-size: 13px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px;
 }

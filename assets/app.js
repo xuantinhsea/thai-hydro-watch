@@ -8,10 +8,6 @@
 "use strict";
 (() => {
   const API = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public";
-  const SHPJS = [
-    "https://cdnjs.cloudflare.com/ajax/libs/shpjs/6.2.0/shp.min.js",
-    "https://cdn.jsdelivr.net/npm/shpjs@6.1.0/dist/shp.min.js",
-  ];
   const CONCURRENCY = 6;
   const FETCH_TIMEOUT = 60e3;
   // The provider silently returns only the latest 366 days of a longer request.
@@ -1095,48 +1091,14 @@
   $("#save-wide").addEventListener("click", saveWide);
   $("#save-stations").addEventListener("click", saveStations);
 
-  // ---- AOI loading ---------------------------------------------------------------------------
+  // ---- the built-in area of interest (data/aoi.js) -------------------------------------------
   function setAOI(aoi) {
     const polys = polygonsOf(aoi.geojson);
-    if (!polys.length) throw new Error("it has no polygons");
-    const b = boundsOf(polys);
-    if (b.w < -180 || b.e > 180 || b.s < -90 || b.n > 90) throw new Error("its coordinates are not longitude/latitude (WGS84, EPSG:4326)");
-    if (b.e < 96 || b.w > 106.5 || b.n < 5 || b.s > 21) throw new Error("it lies outside Thailand, where ThaiWater has no stations");
-    app.aoi = { name: aoi.name, geojson: aoi.geojson, polys, bounds: b };
-    app.proj = makeProjection(b);
-    $("#aoi-name").textContent = aoi.name;
-    $("#aoi-reset").hidden = aoi === window.DEFAULT_AOI;
+    app.aoi = { name: aoi.name, geojson: aoi.geojson, polys, bounds: boundsOf(polys) };
+    app.proj = makeProjection(app.aoi.bounds);
     buildBase();
     applyZoom();
-    if (app.catalogue) pickStations();
   }
-  function loadScript(urls) {
-    return urls.reduce((p, url) => p.catch(() => new Promise((resolve, reject) => {
-      const el = Object.assign(document.createElement("script"), { src: url, onload: resolve, onerror: reject });
-      document.head.appendChild(el);
-    })), Promise.reject(new Error("start"))).catch(() => {
-      throw new Error("the shapefile reader could not be loaded; check your connection or use a GeoJSON file");
-    });
-  }
-  $("#aoi-file").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    e.target.value = "";
-    if (!file) return;
-    showError("");
-    try {
-      let geojson;
-      if (/\.zip$/i.test(file.name)) {
-        if (!window.shp) await loadScript(SHPJS);
-        geojson = await window.shp(await file.arrayBuffer());
-      } else geojson = JSON.parse(await file.text());
-      state.sel = null;
-      setAOI({ name: file.name.replace(/\.(zip|geojson|json)$/i, ""), geojson });
-      fetchAll();
-    } catch (err) {
-      showError(`Could not use ${file.name}: ${err.message}. Load a GeoJSON file or a zipped shapefile in WGS84.`);
-    }
-  });
-  $("#aoi-reset").addEventListener("click", () => { state.sel = null; setAOI(window.DEFAULT_AOI); fetchAll(); });
 
   // ---- controls ---------------------------------------------------------------------------
   function setRange(days) {
@@ -1147,7 +1109,7 @@
   ["#d-start", "#d-end"].forEach((id) => { $(id).max = isoDate(thaiToday()); $(id).min = "2000-01-01"; });
   $("#presets").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-days]");
-    if (b) { setRange(+b.dataset.days); fetchAll(); }
+    if (b) setRange(+b.dataset.days); // fills the dates; Fetch data starts the download
   });
   $("#fetch").addEventListener("click", fetchAll);
   $("#clear-cache").addEventListener("click", async (e) => {
