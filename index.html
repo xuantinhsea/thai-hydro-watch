@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Thai Hydro Watch</title>
+<meta name="description" content="Live water level, discharge and rainfall from Thailand's ThaiWater (HII) network for any area of interest, with data checks and CSV export.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Thai:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="top-text">
+      <h1>Thai Hydro Watch</h1>
+      <p class="sub" id="subtitle">Live water level, discharge and rainfall from the ThaiWater network of the Hydro-Informatics Institute (HII), for the stations inside your area of interest.</p>
+    </div>
+    <details class="about">
+      <summary class="btn"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.2v4M8 4.8v.1"/></svg>About &amp; copyright</summary>
+      <div class="about-panel">
+        <p class="about-title">Thai Hydro Watch</p>
+        <p>&copy; 2026 Nguyen Xuan TINH (Ph.D.). All rights reserved.</p>
+        <address>
+          <b>Nguyen Xuan TINH (Ph.D.)</b><br>
+          Nippon Koei Co., Ltd., Water Resources &amp; Energy Dept.<br>
+          &#12306;102-8539: 5-4 Kojimachi, Chiyoda-ku, Tokyo, JAPAN<br>
+          Tel: +81-80-4689-7461<br>
+          E-mail: <a href="mailto:tinh-ng@n-koei.jp">tinh-ng@n-koei.jp</a><br>
+          URL: <a href="https://www.n-koei.co.jp/consulting/english/" target="_blank" rel="noopener">www.n-koei.co.jp/consulting/english/</a>
+        </address>
+        <p class="note">Station data &copy; Hydro-Informatics Institute (HII), ThaiWater. Map data from Natural Earth (public domain).</p>
+      </div>
+    </details>
+  </header>
+
+  <section class="card databar" aria-label="Data to fetch">
+    <div class="field">
+      <span class="lbl">Area of interest</span>
+      <div class="row">
+        <span class="aoi-name" id="aoi-name">Study area</span>
+        <label class="btn small" for="aoi-file">Load AOI&hellip;</label>
+        <input type="file" id="aoi-file" accept=".geojson,.json,.zip" hidden>
+        <button type="button" class="btn small" id="aoi-reset" hidden>Use default</button>
+      </div>
+    </div>
+    <div class="field">
+      <span class="lbl">Period, Thai time</span>
+      <div class="row">
+        <input type="date" id="d-start" aria-label="Start date">
+        <span aria-hidden="true">to</span>
+        <input type="date" id="d-end" aria-label="End date">
+        <div class="seg" id="presets">
+          <button type="button" data-days="7">7 days</button>
+          <button type="button" data-days="30">30 days</button>
+          <button type="button" data-days="90">90 days</button>
+        </div>
+        <button type="button" class="btn primary" id="fetch">Fetch data</button>
+      </div>
+    </div>
+    <div class="progress" aria-live="polite">
+      <span class="text" id="progress-text">Starting&hellip;</span>
+      <div class="bar"><i id="progress-bar"></i></div>
+      <span class="error" id="error" hidden></span>
+    </div>
+  </section>
+
+  <nav class="filters" aria-label="View">
+    <div class="group"><span class="lbl">Variable</span><div class="seg" id="f-var"></div></div>
+    <div class="group"><span class="lbl">Show</span><div class="seg" id="f-status"></div></div>
+    <div class="group"><span class="lbl">Map colour</span><div class="seg" id="f-color"></div></div>
+    <div class="search"><input id="f-search" type="search" placeholder="Find a station: code, name, province, agency" aria-label="Find a station"></div>
+    <div class="spacer"></div>
+    <div class="group">
+      <button type="button" class="btn" id="save-wide"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M3 13h10"/></svg><span>Save CSV</span></button>
+      <button type="button" class="btn" id="save-stations"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M3 13h10"/></svg>Station list</button>
+    </div>
+  </nav>
+
+  <section class="main">
+    <div class="card">
+      <div class="card-head">
+        <h3>Observed stations</h3>
+        <div class="legend" id="map-legend"></div>
+      </div>
+      <div class="map-box" id="map-box">
+        <svg id="map" role="img" aria-label="Map of ThaiWater stations inside the area of interest"></svg>
+        <div class="zoom">
+          <button type="button" id="z-in" aria-label="Zoom in">+</button>
+          <button type="button" id="z-out" aria-label="Zoom out">&minus;</button>
+          <button type="button" id="z-reset" aria-label="Reset view">&#8634;</button>
+        </div>
+        <div class="map-hint">Scroll to zoom, drag to pan, click a station to open it</div>
+        <div class="tip" id="map-tip" hidden></div>
+      </div>
+    </div>
+    <div class="card detail" id="detail"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h3 id="heat-title">Every station over time</h3>
+      <div class="legend" id="heat-legend"></div>
+    </div>
+    <p class="note" id="heat-note" style="margin-bottom:10px"></p>
+    <div class="heat-scroll" id="heat-scroll">
+      <div class="heat-axis" id="heat-axis"></div>
+      <canvas id="heat" aria-label="Every station over time; the station list below has the same stations"></canvas>
+      <div class="tip" id="heat-tip" hidden></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h3 id="table-title">Station list</h3>
+      <span class="note" id="table-note"></span>
+    </div>
+    <div class="table-scroll" id="table-scroll">
+      <table>
+        <thead id="t-head"></thead>
+        <tbody id="t-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <p><b>Source.</b> ThaiWater Open API of the Hydro-Informatics Institute (<a href="https://www.thaiwater.net/" target="_blank" rel="noopener">thaiwater.net</a>), fetched live by your browser. Values are as published, with no cleaning. Water level is metres above mean sea level, so Bangkok canals can sit below zero. Stations that report every 10 minutes are sampled on the hour to match the hourly stations. Times are Thai local time (UTC+7). Map data made with Natural Earth.</p>
+    <p><b>What ThaiWater publishes.</b> Water level and discharge: hourly, from about 2020. Rainfall: daily totals for any date, but hourly values only from 00:00 yesterday to now. DWR gauges may count the rain day from 07:00 rather than midnight.</p>
+    <p><b>How stations are flagged.</b> Possible spike: water level more than 1 m from its 7-hour running median, or discharge more than half its running median and 10 m³/s away. Stuck: the same water level for 72 hours or more. Rainfall: all zeros over 20 or more wet-season days (May to October), a day of 200 mm or more, or an hour of 100 mm or more. A flag means "look at this", not "this is wrong"; real floods and pumping can trip it.</p>
+    <p><b>Saved CSV files</b> use the station-column layout: a station count, then rows for station name, variable, lat and lon, then one row per time step. Blank cells have no reading. Responses are cached in this browser for up to a week; <a href="#" id="clear-cache">clear the cache</a> to force fresh downloads.</p>
+    <p class="copyright">&copy; 2026 Nguyen Xuan TINH (Ph.D.), Nippon Koei Co., Ltd., Water Resources &amp; Energy Dept. All rights reserved. Contact: <a href="mailto:tinh-ng@n-koei.jp">tinh-ng@n-koei.jp</a></p>
+  </footer>
+</div>
+
+<script src="data/basemap.js"></script>
+<script src="data/aoi.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

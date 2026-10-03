@@ -1,0 +1,5 @@
+geopandas>=1.0
+numpy
+pandas
+requests
+shapely>=2.0
