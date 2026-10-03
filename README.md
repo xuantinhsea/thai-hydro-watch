@@ -12,8 +12,12 @@ station lists and time series directly; there is no server and no account.
 ## What it does
 
 - **Pick a period, press Fetch data.** On opening, the page loads the last 30 days
-  for every station inside the study area. For another period, set the dates (or
-  use the 7 / 30 / 90-day buttons) and press **Fetch data**.
+  of water level and discharge for every station inside the study area. For another
+  period, set the dates (or use the 7 / 30 / 90-day buttons) and press **Fetch data**.
+- **Rain on demand.** Rainfall needs about ten times as many requests, so it loads
+  when you open *Rain daily* or *Rain hourly*, or click a rain gauge.
+- **Stays within ThaiWater's limits.** Requests are paced; if ThaiWater answers
+  HTTP 429 ("too many requests"), the page pauses, slows down and carries on.
 - **Four variables.** Water level (m above mean sea level, hourly), discharge
   (m³/s, hourly), daily rainfall (mm/day) and hourly rainfall (mm/h).
 - **Checks every series.** Each station is marked OK, Gaps (50–90% of readings),

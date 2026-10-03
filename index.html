@@ -53,6 +53,7 @@
     <div class="progress" aria-live="polite">
       <span class="text" id="progress-text">Starting&hellip;</span>
       <div class="bar"><i id="progress-bar"></i></div>
+      <span class="note" id="throttle" hidden></span>
       <span class="error" id="error" hidden></span>
     </div>
   </section>
@@ -118,6 +119,7 @@
   <footer>
     <p><b>Source.</b> ThaiWater Open API of the Hydro-Informatics Institute (<a href="https://www.thaiwater.net/" target="_blank" rel="noopener">thaiwater.net</a>), fetched live by your browser. Values are as published, with no cleaning. Water level is metres above mean sea level, so Bangkok canals can sit below zero. Stations that report every 10 minutes are sampled on the hour to match the hourly stations. Times are Thai local time (UTC+7). Map data made with Natural Earth.</p>
     <p><b>What ThaiWater publishes.</b> Water level and discharge: hourly, from about 2020. Rainfall: daily totals for any date, but hourly values only from 00:00 yesterday to now. DWR gauges may count the rain day from 07:00 rather than midnight.</p>
+    <p><b>Loading order.</b> ThaiWater limits how fast one browser may ask for data, so this page paces its requests and pauses on its own if ThaiWater says "slow down". Fetch data loads water level and discharge. Rainfall, which needs about ten times as many requests, loads when you open Rain daily or Rain hourly, or click a rain gauge.</p>
     <p><b>How stations are flagged.</b> Possible spike: water level more than 1 m from its 7-hour running median, or discharge more than half its running median and 10 m³/s away. Stuck: the same water level for 72 hours or more. Rainfall: all zeros over 20 or more wet-season days (May to October), a day of 200 mm or more, or an hour of 100 mm or more. A flag means "look at this", not "this is wrong"; real floods and pumping can trip it.</p>
     <p><b>Saved CSV files</b> use the station-column layout: a station count, then rows for station name, variable, lat and lon, then one row per time step. Blank cells have no reading. Responses are cached in this browser for up to a week; <a href="#" id="clear-cache">clear the cache</a> to force fresh downloads.</p>
     <p class="copyright">&copy; 2026 Nguyen Xuan TINH (Ph.D.), Nippon Koei Co., Ltd., Water Resources &amp; Energy Dept. All rights reserved. Contact: <a href="mailto:tinh-ng@n-koei.jp">tinh-ng@n-koei.jp</a></p>

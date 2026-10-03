@@ -8,7 +8,10 @@
 "use strict";
 (() => {
   const API = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public";
-  const CONCURRENCY = 6;
+  // ThaiWater answers HTTP 429 to bursts, so requests are paced well below that.
+  const CONCURRENCY = 4;
+  const MIN_GAP = 150; // ms between request starts
+  const MAX_ATTEMPTS = 8;
   const FETCH_TIMEOUT = 60e3;
   // The provider silently returns only the latest 366 days of a longer request.
   const CHUNK_DAYS = 183;
@@ -83,31 +86,72 @@
       const hit = await cache.get(url);
       if (hit && Date.now() - hit.t < hit.ttl) return hit.data;
     }
-    let last;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      if (signal && signal.aborted) throw new DOMException("Aborted", "AbortError");
+    let last, limited = 0;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      await limiter.acquire(signal);
       // Each attempt gets its own timeout, so a stalled connection is retried, not waited on.
       const ctrl = new AbortController(), stop = () => ctrl.abort();
       if (signal) signal.addEventListener("abort", stop, { once: true });
       const timer = setTimeout(stop, FETCH_TIMEOUT);
       try {
         const r = await fetch(url, { signal: ctrl.signal });
+        if (r.status === 429) throw Object.assign(new Error("ThaiWater is limiting requests (HTTP 429)"), { status: 429 });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = (await r.json()).data;
         // A transient database failure arrives as "500: ..." inside a 200 response.
         if (typeof data === "string" && /^5\d\d/.test(data)) throw new Error(data.slice(0, 80));
+        limiter.succeeded();
         if (ttl) cache.set(url, { t: Date.now(), ttl, data });
         return data;
       } catch (e) {
         if (signal && signal.aborted) throw new DOMException("Aborted", "AbortError");
         last = e.name === "AbortError" ? new Error("no answer within 60 s") : e;
-        await sleep(1200 * (attempt + 1));
+        if (e.status === 429) limiter.limited(limited++);
+        else if (attempt >= 3) break; // other errors get 4 tries; rate limits get the full patience
+        else await sleep(1200 * (attempt + 1));
       } finally {
         clearTimeout(timer);
+        limiter.release();
         if (signal) signal.removeEventListener("abort", stop);
       }
     }
     throw last;
+  }
+
+  // Paces every request: at most `max` in flight, a short gap between starts, and on
+  // HTTP 429 a pause for all requests plus a lower `max` that recovers slowly.
+  const limiter = {
+    max: CONCURRENCY, active: 0, nextStart: 0, pausedUntil: 0, streak: 0,
+    async acquire(signal) {
+      for (;;) {
+        if (signal && signal.aborted) throw new DOMException("Aborted", "AbortError");
+        const now = Date.now(), wait = Math.max(this.pausedUntil, this.nextStart) - now;
+        if (this.active < this.max && wait <= 0) {
+          this.active++;
+          this.nextStart = now + MIN_GAP;
+          return;
+        }
+        await sleep(Math.max(40, Math.min(wait, 1000)));
+      }
+    },
+    release() { this.active = Math.max(0, this.active - 1); },
+    succeeded() {
+      if (Date.now() > this.pausedUntil) showThrottle(0);
+      if (++this.streak >= 40 && this.max < CONCURRENCY) { this.max++; this.streak = 0; }
+    },
+    limited(times) {
+      this.max = 1;
+      this.streak = 0;
+      const pause = Math.min(60e3, 8e3 * 2 ** times);
+      this.pausedUntil = Math.max(this.pausedUntil, Date.now() + pause);
+      showThrottle(Math.round(pause / 1000));
+    },
+  };
+  function showThrottle(seconds) {
+    const el = $("#throttle");
+    if (!el) return;
+    el.hidden = !seconds;
+    if (seconds) el.textContent = `ThaiWater asked this page to slow down (HTTP 429), so downloads pause for ${seconds} s and then continue more slowly. Nothing is lost.`;
   }
 
   async function pool(items, worker, signal, onDone) {
@@ -154,7 +198,7 @@
     catalogue: null,
     stations: [], byKey: new Map(),
     series: { wl: null, q: null, rain: null, rainh: null },
-    run: null, rainhRun: null, wantRainh: false, rainhBulk: false,
+    run: null, extra: null, want: { rain: false, rainh: false },
     lastLoaded: null,
   };
   const series = (v) => app.series[v];
@@ -590,7 +634,7 @@
       return;
     }
     const vars = varsOf(s);
-    if (s.kind === "r" && !rowOf("rainh", s.k)) fetchOneRainHourly(s);
+    if (s.kind === "r" && (!rowOf("rain", s.k) || !rowOf("rainh", s.k))) fetchOneRain(s);
     const chips = vars.filter((v) => app.series[v]).map((v) => {
       const r = rowOf(v, s.k);
       return r ? chip(r.status, `${VARS[v].label.toLowerCase()} ${pct(r.c)}`) : chip("pending", VARS[v].label.toLowerCase());
@@ -748,7 +792,7 @@
     const b = e.target.closest("button");
     if (!b) return;
     state.v = b.dataset.v;
-    if (state.v === "rainh") ensureRainHourly();
+    if (VARS[state.v].kind === "r") wantRain(state.v);
     const sel = state.sel && app.byKey.get(state.sel);
     if (!sel || !inVar(sel, state.v)) state.sel = sortedForTable()[0] || state.sel;
     renderAll();
@@ -804,7 +848,11 @@
     const prev = state.v;
     if (s.kind === "r" && VARS[state.v].kind !== "r") state.v = "rain";
     else if (s.kind === "w" && (VARS[state.v].kind !== "w" || (state.v === "q" && !rowOf("q", k)))) state.v = "wl";
-    if (state.v !== prev) { renderAll(); markTableSelection(true); return; }
+    if (state.v !== prev) {
+      if (VARS[state.v].kind === "r") wantRain(state.v);
+      renderAll(); markTableSelection(true);
+      return;
+    }
     updateMap(); renderDetail(); renderHeat(); markTableSelection(from !== "table");
   }
   function renderSubtitle() {
@@ -921,33 +969,38 @@
           if (has(d) && d >= 0 && !has(qv[i])) qv[i] = d;
         }
       }
-      if (app.run !== run) return;
+      if (run.ctrl.signal.aborted) return;
       if (error) failed++;
       sWL.rows.set(s.k, summarise("wl", lv, error ? ["download failed for part of the period"] : []));
       if (qv.some(has)) sQ.rows.set(s.k, summarise("q", qv));
     }, run.ctrl.signal, (s) => { done++; stage("Water level and discharge", done, list.length, failed ? ` · ${failed} failed` : ""); scheduleRender(s.k); });
   }
   async function fetchRainDaily(run) {
-    const list = app.stations.filter((s) => s.kind === "r"), ser = series("rain"), months = monthsBetween(run.start, run.end);
+    const list = app.stations.filter((s) => s.kind === "r" && !series("rain").rows.has(s.k)), ser = series("rain");
+    const months = monthsBetween(run.start, run.end);
     let done = 0, failed = 0;
     stage("Rain daily", 0, list.length);
     await pool(list, async (s) => {
-      const vals = new Float32Array(ser.n).fill(NaN);
-      let error = false;
-      for (const mo of months) {
-        let data;
-        try {
-          data = await getJSON("rain_monthly_graph", { station_id: s.id, month: mo.month, year: mo.year }, { ttl: ttlFor(mo.end), signal: run.ctrl.signal });
-        } catch (e) { if (e.name === "AbortError") throw e; error = true; continue; }
-        for (const p of Array.isArray(data) ? data : []) {
-          const i = Math.round((parseStamp(p.rainfall_datetime) - ser.t0) / DAY), v = num(p.rainfall_value);
-          if (i >= 0 && i < ser.n && has(v) && v >= 0) vals[i] = v;
-        }
-      }
-      if (app.run !== run) return;
+      const { vals, error } = await rainDailyValues(s, ser, months, run.ctrl.signal);
+      if (run.ctrl.signal.aborted) return;
       if (error) failed++;
       ser.rows.set(s.k, summarise("rain", vals, error ? ["download failed for part of the period"] : []));
     }, run.ctrl.signal, (s) => { done++; stage("Rain daily", done, list.length, failed ? ` · ${failed} failed` : ""); scheduleRender(s.k); });
+  }
+  async function rainDailyValues(s, ser, months, signal) {
+    const vals = new Float32Array(ser.n).fill(NaN);
+    let error = false;
+    for (const mo of months) {
+      let data;
+      try {
+        data = await getJSON("rain_monthly_graph", { station_id: s.id, month: mo.month, year: mo.year }, { ttl: ttlFor(mo.end), signal });
+      } catch (e) { if (e.name === "AbortError") throw e; error = true; continue; }
+      for (const p of Array.isArray(data) ? data : []) {
+        const i = Math.round((parseStamp(p.rainfall_datetime) - ser.t0) / DAY), v = num(p.rainfall_value);
+        if (i >= 0 && i < ser.n && has(v) && v >= 0) vals[i] = v;
+      }
+    }
+    return { vals, error };
   }
   function rainHourlySeries() {
     const now = Math.floor(thaiNow() / HOUR) * HOUR, t0 = thaiToday() - DAY;
@@ -965,41 +1018,62 @@
     return vals;
   }
   async function fetchRainHourly(signal) {
-    const list = app.stations.filter((s) => s.kind === "r"), ser = rainHourlySeries();
+    const ser = rainHourlySeries(), list = app.stations.filter((s) => s.kind === "r" && !ser.rows.has(s.k));
     let done = 0;
     stage("Rain hourly", 0, list.length);
     await pool(list, async (s) => {
       try { ser.rows.set(s.k, summarise("rainh", await rainHourlyValues(s, ser, signal))); }
       catch (e) { if (e.name === "AbortError") throw e; ser.rows.set(s.k, summarise("rainh", new Float32Array(ser.n).fill(NaN), ["download failed"])); }
     }, signal, (s) => { done++; stage("Rain hourly", done, list.length); scheduleRender(s.k); });
-    app.rainhBulk = true;
   }
-  const oneHourly = new Set();
-  async function fetchOneRainHourly(s) {
-    if (oneHourly.has(s.k)) return;
-    oneHourly.add(s.k);
+
+  // Rain is about nine requests in ten, so it loads only when someone looks at it: a rain
+  // tab loads every gauge, and opening one gauge loads just that gauge.
+  const rainLoaded = (v) => {
+    const ser = v === "rainh" ? rainHourlySeries() : series(v);
+    return !!ser && app.stations.every((s) => s.kind !== "r" || ser.rows.has(s.k));
+  };
+  function wantRain(v) {
+    app.want[v] = true;
+    if (!app.run || !app.run.done) return; // the running fetch takes it up after water level
+    if (app.extra || rainLoaded(v)) return;
+    const run = app.run, ctrl = new AbortController();
+    run.ctrl.signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+    app.extra = ctrl;
+    (v === "rain" ? fetchRainDaily({ ...run, ctrl }) : fetchRainHourly(ctrl.signal))
+      .then(() => finished())
+      .catch((e) => { if (e.name !== "AbortError") { showError(friendlyError(e)); setProgress("Stopped.", 0); } })
+      .finally(() => {
+        if (app.extra === ctrl) app.extra = null;
+        const next = ["rain", "rainh"].find((w) => app.want[w] && !rainLoaded(w));
+        if (next && !ctrl.signal.aborted) wantRain(next);
+      });
+  }
+  const oneRain = new Set();
+  async function fetchOneRain(s) {
+    if (oneRain.has(s.k) || !app.run) return;
+    oneRain.add(s.k);
     try {
-      const ser = rainHourlySeries();
-      ser.rows.set(s.k, summarise("rainh", await rainHourlyValues(s, ser)));
-      if (state.sel === s.k) renderDetail();
-    } catch (e) { /* the chart keeps its loading note; the bulk fetch can still fill it */ }
-    finally { oneHourly.delete(s.k); }
+      const daily = series("rain");
+      if (daily && !daily.rows.has(s.k)) {
+        const { vals, error } = await rainDailyValues(s, daily, monthsBetween(app.run.start, app.run.end));
+        if (series("rain") === daily && !error) daily.rows.set(s.k, summarise("rain", vals));
+      }
+      const hourly = rainHourlySeries();
+      if (!hourly.rows.has(s.k)) hourly.rows.set(s.k, summarise("rainh", await rainHourlyValues(s, hourly)));
+      scheduleRender(s.k);
+    } catch (e) { /* the charts keep their loading note; a rain tab loads every gauge */ }
+    finally { oneRain.delete(s.k); }
   }
-  function ensureRainHourly() {
-    if (app.run && !app.run.done) { app.wantRainh = true; return; }
-    const ser = series("rainh");
-    if (ser && ser.rows.size >= app.stations.filter((s) => s.kind === "r").length && ser === rainHourlySeries()) return;
-    if (app.rainhRun) return;
-    const ctrl = new AbortController();
-    app.rainhRun = ctrl;
-    fetchRainHourly(ctrl.signal).then(() => finished()).catch((e) => { if (e.name !== "AbortError") showError(e.message); })
-      .finally(() => { if (app.rainhRun === ctrl) app.rainhRun = null; });
-  }
+  const friendlyError = (e) => (e.status === 429
+    ? "ThaiWater is limiting requests right now (HTTP 429). Wait a minute, then press Fetch data again."
+    : `ThaiWater did not answer: ${e.message}. Check your connection and press Fetch data again.`);
   function finished() {
     const t = new Date(thaiNow());
     app.lastLoaded = `${pad(t.getUTCHours())}:${pad(t.getUTCMinutes())}`;
     const nW = app.stations.filter((s) => s.kind === "w").length, nR = app.stations.length - nW;
-    setProgress(`<b>Up to date</b>: ${fmtInt(nW)} water level stations and ${fmtInt(nR)} rain gauges, loaded at ${app.lastLoaded} Thai time.`, 1);
+    const rainNote = rainLoaded("rain") || rainLoaded("rainh") ? "" : " Rainfall loads when you open Rain daily or Rain hourly, or click a rain gauge.";
+    setProgress(`<b>Up to date</b>: ${fmtInt(nW)} water level stations and ${fmtInt(nR)} rain gauges, loaded at ${app.lastLoaded} Thai time.${rainNote}`, 1);
     renderAll();
   }
 
@@ -1010,12 +1084,12 @@
     if (!has(start) || !has(end)) { showError("Pick a start and an end date."); return; }
     if (end > today) end = today;
     if (start > end) { showError("The start date must be on or before the end date."); return; }
-    if (app.catalogue) {
+    if (app.catalogue && (app.want.rain || state.v === "rain")) {
       const nR = app.stations.filter((s) => s.kind === "r").length, months = monthsBetween(start, end).length;
       if (nR * months > BIG_JOB && !window.confirm(`This period needs about ${fmtInt(nR * months)} rainfall requests to ThaiWater and may take a long time. Continue?`)) return;
     }
     if (app.run) app.run.ctrl.abort();
-    if (app.rainhRun) { app.rainhRun.abort(); app.rainhRun = null; }
+    if (app.extra) { app.extra.abort(); app.extra = null; }
     const run = (app.run = { ctrl: new AbortController(), start, end, done: false });
     const lastHour = Math.min(end + 23 * HOUR, Math.floor(thaiNow() / HOUR) * HOUR);
     app.series.wl = newSeries(start, 60, Math.floor((lastHour - start) / HOUR) + 1);
@@ -1025,15 +1099,16 @@
     try {
       await ensureCatalogues(run.ctrl.signal);
       renderAll();
-      const rainFirst = VARS[state.v].kind === "r";
-      if (rainFirst) { await fetchRainDaily(run); await fetchWaterLevels(run); } else { await fetchWaterLevels(run); await fetchRainDaily(run); }
-      if (app.wantRainh || state.v === "rainh" || app.rainhBulk) { app.wantRainh = false; await fetchRainHourly(run.ctrl.signal); }
+      const wantDaily = () => app.want.rain || state.v === "rain", wantHourly = () => app.want.rainh || state.v === "rainh";
+      if (state.v === "rain") { await fetchRainDaily(run); await fetchWaterLevels(run); } else { await fetchWaterLevels(run); if (wantDaily()) await fetchRainDaily(run); }
+      if (wantHourly() && !rainLoaded("rainh")) await fetchRainHourly(run.ctrl.signal);
+      if (wantDaily() && !rainLoaded("rain")) await fetchRainDaily(run); // opened while hourly rain loaded
       run.done = true;
       if (app.run === run) finished();
     } catch (e) {
       run.done = true;
       if (e.name === "AbortError") return;
-      showError(`ThaiWater did not answer: ${e.message}. Check your connection and press Fetch data again.`);
+      showError(friendlyError(e));
       setProgress("Stopped.", 0);
     }
   }
