@@ -1,25 +1,23 @@
 # Thai Hydro Watch
 
-Live water level, discharge and rainfall from Thailand's ThaiWater network
-(Hydro-Informatics Institute, HII) for the stations inside your area of interest,
+Water level, discharge and rainfall from Thailand's ThaiWater network
+(Hydro-Informatics Institute, HII) for the stations inside the study area,
 with data checks and CSV export.
 
-**Open the app:** https://xuantinhsea.github.io/thai-hydro-watch/
+**Open it:** https://xuantinhsea.github.io/thai-hydro-watch/
 
-Everything runs in your browser. The page asks the ThaiWater Open API for the
-station lists and time series directly; there is no server and no account.
+**Share it as one file:** [share/thai-hydro-watch.html](share/thai-hydro-watch.html)
+(3 MB, data included). Send it by e-mail or Teams; it opens with a double-click,
+with no server and no internet connection needed.
 
-## What it does
+The page shows a snapshot downloaded from the ThaiWater Open API: 359 water level
+stations (123 with discharge) and 2,003 rain gauges, 1 Sep 2026 00:00 to
+3 Oct 2026 20:00, Thai time (UTC+7). It does not contact ThaiWater itself.
 
-- **Pick a period, press Fetch data.** On opening, the page loads the last 30 days
-  of water level and discharge for every station inside the study area. For another
-  period, set the dates (or use the 7 / 30 / 90-day buttons) and press **Fetch data**.
-- **Rain on demand.** Rainfall needs about ten times as many requests, so it loads
-  when you open *Rain daily* or *Rain hourly*, or click a rain gauge.
-- **Stays within ThaiWater's limits.** Requests are paced; if ThaiWater answers
-  HTTP 429 ("too many requests"), the page pauses, slows down and carries on.
-- **Four variables.** Water level (m above mean sea level, hourly), discharge
-  (m³/s, hourly), daily rainfall (mm/day) and hourly rainfall (mm/h).
+## What it shows
+
+- **Three variables.** Water level (m above mean sea level, hourly), discharge
+  (m³/s, hourly) and daily rainfall (mm/day).
 - **Checks every series.** Each station is marked OK, Gaps (50–90% of readings),
   Sparse (under 50%) or Check (possible spikes, stuck sensors, extreme totals).
 - **Map, hydrographs and an every-station view.** Click a station on the map, in
@@ -28,8 +26,15 @@ station lists and time series directly; there is no server and no account.
   - *Save … CSV* writes the current variable for every station in view.
   - *Station list* writes station metadata with each station's check results.
   - *Save CSV* beside each chart writes that station alone.
-- **Built-in study area.** The area of interest is part of the site, so the only
-  thing to choose is the period.
+
+## Update the data
+
+```
+pip install -r python/requirements.txt
+python python/download_aoi_thaiwater.py 2026-09-01   # downloads into output/
+python python/build_dataset.py                        # rebuilds data/dataset.js and share/
+git commit -am "Update data" && git push              # GitHub Pages republishes
+```
 
 ### CSV layout
 
@@ -60,23 +65,16 @@ For hourly rainfall further back, run `python/download_aoi_rain_hourly.py` once 
 day to build your own archive, or use `python/download_aoi_persiann_ccs.py` for
 PERSIANN-CCS hourly satellite rainfall (0.04°) over the area of interest.
 
-## Run it locally
-
-Open `index.html` in a browser; it works straight from disk. To change the default
-area of interest, replace the GeoJSON object in `data/aoi.js` (and `data/aoi.geojson`,
-which the Python scripts read).
-
-## Python scripts
+## Other Python scripts
 
 ```
-pip install -r python/requirements.txt
-python python/download_aoi_thaiwater.py 2026-09-01 2026-10-03   # water level, discharge, daily rain
-python python/download_aoi_rain_hourly.py                        # hourly rain archive (run daily)
-python python/download_aoi_persiann_ccs.py 2026-09-01            # satellite hourly rain grid
+python python/download_aoi_rain_hourly.py                 # hourly rain archive (run daily)
+python python/download_aoi_persiann_ccs.py 2026-09-01     # satellite hourly rain grid
 ```
 
-Output goes to `output/`. Set `AOI_PATH` (GeoJSON or shapefile) and `OUT_DIR` to
-change the area or the folder.
+Output goes to `output/`. The study area is `data/aoi.geojson` (and `data/aoi.js`
+for the page); set `AOI_PATH` (GeoJSON or shapefile) and `OUT_DIR` to change the
+area or the folder.
 
 ## Data sources
 

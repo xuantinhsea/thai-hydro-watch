@@ -1,41 +1,27 @@
-/* Thai Hydro Watch: live ThaiWater (HII) station data for an area of interest.
+/* Thai Hydro Watch: ThaiWater (HII) station data for the study area.
  * Copyright (c) 2026 Nguyen Xuan TINH (Ph.D.), Nippon Koei Co., Ltd. All rights reserved.
  *
- * Everything runs in the browser. The ThaiWater Open API answers cross-origin
- * requests, so the page fetches station lists and time series directly, caches
- * the responses in IndexedDB, checks each series and draws it.
+ * The page shows a fixed snapshot (data/dataset.js, built by python/build_dataset.py).
+ * It checks every series in the browser and draws the map, charts, overview and table;
+ * nothing is fetched, so the page also works as a single file opened from disk.
  */
 "use strict";
 (() => {
-  const API = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public";
-  // ThaiWater answers HTTP 429 to bursts, so requests are paced well below that.
-  const CONCURRENCY = 4;
-  const MIN_GAP = 150; // ms between request starts
-  const MAX_ATTEMPTS = 8;
-  const FETCH_TIMEOUT = 60e3;
-  // The provider silently returns only the latest 366 days of a longer request.
-  const CHUNK_DAYS = 183;
-  const HOUR = 3600e3, DAY = 86400e3, THAI = 7 * HOUR;
-  const FLAGS = { spikeM: 1, stuckH: 72, rainDayMm: 200, rainHourMm: 100, wetZeroDays: 20 };
-  const BIG_JOB = 6000;
+  const HOUR = 3600e3, DAY = 86400e3;
+  const FLAGS = { spikeM: 1, stuckH: 72, rainDayMm: 200, wetZeroDays: 20 };
 
   const $ = (s) => document.querySelector(s);
   const NS = "http://www.w3.org/2000/svg";
   const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const pad = (n) => String(n).padStart(2, "0");
   const has = (x) => x === x; // series are Float32Arrays; missing is NaN
-  const num = (x) => (x === null || x === undefined || x === "" ? NaN : Number(x));
   const esc = (t) => String(t ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmtInt = (n) => n.toLocaleString("en-US");
   const fmtNum = (v, dec) => (has(v) && v !== null ? (+v.toFixed(dec)).toLocaleString("en-US", { maximumFractionDigits: dec }) : "–");
   const pct = (c) => `${Math.round(c * 100)}%`;
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // ---- time: all times are naive Thai clock times held as UTC milliseconds ----------
-  const thaiNow = () => Date.now() + THAI;
-  const thaiToday = () => Math.floor(thaiNow() / DAY) * DAY;
   const isoDate = (t) => new Date(t).toISOString().slice(0, 10);
-  const parseDate = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(s || "") ? Date.parse(`${s}T00:00:00Z`) : NaN);
   const parseStamp = (s) => {
     const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/.exec(s || "");
     return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0)) : NaN;
@@ -50,129 +36,12 @@
     const d = new Date(t);
     return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${d.getUTCHours()}:${pad(d.getUTCMinutes())}`;
   };
-  const ttlFor = (endDay) => (endDay < thaiToday() - 3 * DAY ? 7 * DAY : 20 * 60e3);
-
-  // ---- response cache ------------------------------------------------------------
-  const cache = (() => {
-    let dbp = null;
-    const open = () => dbp || (dbp = new Promise((resolve, reject) => {
-      try {
-        const r = indexedDB.open("thai-hydro-watch", 1);
-        r.onupgradeneeded = () => r.result.createObjectStore("http");
-        r.onsuccess = () => resolve(r.result);
-        r.onerror = () => reject(r.error);
-      } catch (e) { reject(e); }
-    }));
-    // A blocked or unavailable IndexedDB must never stall a download, so every call
-    // gives up after a moment and the request goes to the network instead.
-    const call = (mode, fn) => Promise.race([
-      open().then((db) => new Promise((resolve) => {
-        const q = fn(db.transaction("http", mode).objectStore("http"));
-        q.onsuccess = () => resolve(q.result);
-        q.onerror = () => resolve(undefined);
-      })).catch(() => undefined),
-      sleep(1500).then(() => undefined),
-    ]);
-    return {
-      get: (k) => call("readonly", (s) => s.get(k)),
-      set: (k, v) => call("readwrite", (s) => s.put(v, k)),
-      clear: () => call("readwrite", (s) => s.clear()),
-    };
-  })();
-
-  async function getJSON(path, params, { ttl = 0, signal } = {}) {
-    const url = `${API}/${path}?${new URLSearchParams(params)}`;
-    if (ttl) {
-      const hit = await cache.get(url);
-      if (hit && Date.now() - hit.t < hit.ttl) return hit.data;
-    }
-    let last, limited = 0;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      await limiter.acquire(signal);
-      // Each attempt gets its own timeout, so a stalled connection is retried, not waited on.
-      const ctrl = new AbortController(), stop = () => ctrl.abort();
-      if (signal) signal.addEventListener("abort", stop, { once: true });
-      const timer = setTimeout(stop, FETCH_TIMEOUT);
-      try {
-        const r = await fetch(url, { signal: ctrl.signal });
-        if (r.status === 429) throw Object.assign(new Error("ThaiWater is limiting requests (HTTP 429)"), { status: 429 });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const data = (await r.json()).data;
-        // A transient database failure arrives as "500: ..." inside a 200 response.
-        if (typeof data === "string" && /^5\d\d/.test(data)) throw new Error(data.slice(0, 80));
-        limiter.succeeded();
-        if (ttl) cache.set(url, { t: Date.now(), ttl, data });
-        return data;
-      } catch (e) {
-        if (signal && signal.aborted) throw new DOMException("Aborted", "AbortError");
-        last = e.name === "AbortError" ? new Error("no answer within 60 s") : e;
-        if (e.status === 429) limiter.limited(limited++);
-        else if (attempt >= 3) break; // other errors get 4 tries; rate limits get the full patience
-        else await sleep(1200 * (attempt + 1));
-      } finally {
-        clearTimeout(timer);
-        limiter.release();
-        if (signal) signal.removeEventListener("abort", stop);
-      }
-    }
-    throw last;
-  }
-
-  // Paces every request: at most `max` in flight, a short gap between starts, and on
-  // HTTP 429 a pause for all requests plus a lower `max` that recovers slowly.
-  const limiter = {
-    max: CONCURRENCY, active: 0, nextStart: 0, pausedUntil: 0, streak: 0,
-    async acquire(signal) {
-      for (;;) {
-        if (signal && signal.aborted) throw new DOMException("Aborted", "AbortError");
-        const now = Date.now(), wait = Math.max(this.pausedUntil, this.nextStart) - now;
-        if (this.active < this.max && wait <= 0) {
-          this.active++;
-          this.nextStart = now + MIN_GAP;
-          return;
-        }
-        await sleep(Math.max(40, Math.min(wait, 1000)));
-      }
-    },
-    release() { this.active = Math.max(0, this.active - 1); },
-    succeeded() {
-      if (Date.now() > this.pausedUntil) showThrottle(0);
-      if (++this.streak >= 40 && this.max < CONCURRENCY) { this.max++; this.streak = 0; }
-    },
-    limited(times) {
-      this.max = 1;
-      this.streak = 0;
-      const pause = Math.min(60e3, 8e3 * 2 ** times);
-      this.pausedUntil = Math.max(this.pausedUntil, Date.now() + pause);
-      showThrottle(Math.round(pause / 1000));
-    },
-  };
-  function showThrottle(seconds) {
-    const el = $("#throttle");
-    if (!el) return;
-    el.hidden = !seconds;
-    if (seconds) el.textContent = `ThaiWater asked this page to slow down (HTTP 429), so downloads pause for ${seconds} s and then continue more slowly. Nothing is lost.`;
-  }
-
-  async function pool(items, worker, signal, onDone) {
-    let next = 0;
-    const lane = async () => {
-      while (next < items.length && !signal.aborted) {
-        const item = items[next++];
-        await worker(item);
-        onDone(item);
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, lane));
-    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-  }
 
   // ---- variables and statuses -------------------------------------------------------
   const VARS = {
     wl: { label: "Water level", unit: "m MSL", mark: "line", cls: "t-w", dec: 3, step: "hourly", csv: "Water level (m MSL)", kind: "w" },
     q: { label: "Discharge", unit: "m³/s", mark: "line", cls: "t-q", dec: 2, step: "hourly", csv: "Discharge (m3/s)", kind: "w" },
     rain: { label: "Rain daily", unit: "mm/day", mark: "bar", cls: "t-r", dec: 1, step: "daily", csv: "Rainfall (mm/day)", kind: "r" },
-    rainh: { label: "Rain hourly", unit: "mm/h", mark: "bar", cls: "t-r", dec: 1, step: "hourly, 00:00 yesterday to now", csv: "Rainfall (mm/h)", kind: "r" },
   };
   const TYPE = { w: "Water level", q: "Water level + discharge", r: "Rain gauge" };
   const STATUS = {
@@ -193,14 +62,7 @@
 
   // ---- app state ---------------------------------------------------------------------
   const state = { v: "wl", status: "all", color: "type", q: "", sel: null };
-  const app = {
-    aoi: null, proj: null,
-    catalogue: null,
-    stations: [], byKey: new Map(),
-    series: { wl: null, q: null, rain: null, rainh: null },
-    run: null, extra: null, want: { rain: false, rainh: false },
-    lastLoaded: null,
-  };
+  const app = { aoi: null, proj: null, stations: [], byKey: new Map(), series: { wl: null, q: null, rain: null } };
   const series = (v) => app.series[v];
   const rowOf = (v, k) => (app.series[v] ? app.series[v].rows.get(k) || null : null);
   const statusOf = (v, k) => { const r = rowOf(v, k); return r ? r.status : "pending"; };
@@ -268,11 +130,6 @@
         }
         if (wetDays >= FLAGS.wetZeroDays && wetSum === 0) notes.push(`all zeros over ${wetDays} wet-season days`);
         if (heavy) notes.push(`${heavy} day${heavy > 1 ? "s" : ""} ≥ ${FLAGS.rainDayMm} mm`);
-      }
-      if (v === "rainh") {
-        let heavy = 0;
-        for (let i = 0; i < n; i++) if (vals[i] >= FLAGS.rainHourMm) heavy++;
-        if (heavy) notes.push(`${heavy} hour${heavy > 1 ? "s" : ""} ≥ ${FLAGS.rainHourMm} mm`);
       }
     }
     const sorted = Float32Array.from(vals.filter(has)).sort();
@@ -435,7 +292,7 @@
         `<span><i class="key small bg-r"></i>Rain gauge · ${fmtInt(n.r - n.empty)}</span>` +
         (n.empty ? `<span><i class="key small hollow"></i>Rain gauge, no data · ${fmtInt(n.empty)}</span>` : "");
     } else {
-      el.innerHTML = ["check", "sparse", "gaps", "ok", "pending"].map((s) => `<span><i class="key bg-${s}"></i>${STATUS[s].label}</span>`).join("") +
+      el.innerHTML = ["check", "sparse", "gaps", "ok"].map((s) => `<span><i class="key bg-${s}"></i>${STATUS[s].label}</span>`).join("") +
         `<span><i class="key bg-dim"></i>Not ${VARS[state.v].label.toLowerCase()}</span>`;
     }
   }
@@ -484,7 +341,7 @@
   });
   svg.addEventListener("pointerleave", () => { if (!drag) mapTip.hidden = true; });
 
-  const varsOf = (s) => (s.kind === "r" ? ["rain", "rainh"] : rowOf("q", s.k) ? ["wl", "q"] : ["wl"]);
+  const varsOf = (s) => (s.kind === "r" ? ["rain"] : rowOf("q", s.k) ? ["wl", "q"] : ["wl"]);
   function statusLine(v, k) {
     const r = rowOf(v, k);
     return r ? chip(r.status, pct(r.c)) : chip("pending");
@@ -634,7 +491,6 @@
       return;
     }
     const vars = varsOf(s);
-    if (s.kind === "r" && (!rowOf("rain", s.k) || !rowOf("rainh", s.k))) fetchOneRain(s);
     const chips = vars.filter((v) => app.series[v]).map((v) => {
       const r = rowOf(v, s.k);
       return r ? chip(r.status, `${VARS[v].label.toLowerCase()} ${pct(r.c)}`) : chip("pending", VARS[v].label.toLowerCase());
@@ -686,7 +542,7 @@
     if (rain) {
       $("#heat-legend").innerHTML = RAIN_CLASSES.map((c) => `<span><i class="sq" style="background:var(--seq${c.stop + 1})"></i>${c.label}</span>`).join("") +
         `<span><i class="sq blank"></i>No reading</span>`;
-      $("#heat-note").textContent = `One row per gauge, north at the top, one column per ${v === "rain" ? "day" : "hour"}. Classes follow the Thai Meteorological Department's daily rainfall scale${v === "rainh" ? ", applied here to hourly totals" : ""} (mm). Hover for values, click a row to open the gauge.`;
+      $("#heat-note").textContent = "One row per gauge, north at the top, one column per day. Classes follow the Thai Meteorological Department's daily rainfall scale (mm/day). Hover for values, click a row to open the gauge.";
     } else {
       $("#heat-legend").innerHTML = `<span>Station's low</span><i class="ramp"></i><span>high</span><span><i class="sq blank"></i>No reading</span>`;
       $("#heat-note").textContent = `One row per station, north at the top, one column per hour. Each row is scaled to that station's own ${m.label.toLowerCase()} range, so a sudden dark or pale streak is a jump worth a look. Hover for values, click a row to open the station.`;
@@ -792,7 +648,6 @@
     const b = e.target.closest("button");
     if (!b) return;
     state.v = b.dataset.v;
-    if (VARS[state.v].kind === "r") wantRain(state.v);
     const sel = state.sel && app.byKey.get(state.sel);
     if (!sel || !inVar(sel, state.v)) state.sel = sortedForTable()[0] || state.sel;
     renderAll();
@@ -849,7 +704,6 @@
     if (s.kind === "r" && VARS[state.v].kind !== "r") state.v = "rain";
     else if (s.kind === "w" && (VARS[state.v].kind !== "w" || (state.v === "q" && !rowOf("q", k)))) state.v = "wl";
     if (state.v !== prev) {
-      if (VARS[state.v].kind === "r") wantRain(state.v);
       renderAll(); markTableSelection(true);
       return;
     }
@@ -857,260 +711,12 @@
   }
   function renderSubtitle() {
     const nW = app.stations.filter((s) => s.kind === "w").length, nR = app.stations.length - nW, ser = series("wl");
-    const period = ser ? ` Period ${fmtTime(ser.t0, true)} to ${fmtTime(ser.t0 + (ser.n - 1) * HOUR, false)}, Thai time (UTC+7).` : "";
-    $("#subtitle").textContent = app.stations.length
-      ? `${fmtInt(nW)} water level stations and ${fmtInt(nR)} rain gauges inside ${app.aoi.name}, live from the ThaiWater network of the Hydro-Informatics Institute (HII).${period}`
-      : `Live water level, discharge and rainfall from the ThaiWater network of the Hydro-Informatics Institute (HII), for the stations inside ${app.aoi ? app.aoi.name : "your area of interest"}.`;
+    $("#subtitle").textContent = `${fmtInt(nW)} water level stations (${fmtInt(series("q").rows.size)} also measure discharge) and ` +
+      `${fmtInt(nR)} rain gauges inside the study area, from the ThaiWater network of the Hydro-Informatics Institute (HII). ` +
+      `Period ${fmtTime(ser.t0, false)} to ${fmtTime(ser.t0 + (ser.n - 1) * HOUR, false)}, Thai time (UTC+7).`;
   }
   function renderAll() {
     renderSubtitle(); renderFilters(); renderMapLegend(); updateMap(); renderDetail(); renderHeatLegend(); renderHeat(); renderTable(); markTableSelection(false);
-  }
-  let renderTimer = 0, detailDirty = false;
-  function scheduleRender(k) {
-    if (k && k === state.sel) detailDirty = true;
-    if (renderTimer) return;
-    renderTimer = setTimeout(() => {
-      renderTimer = 0;
-      renderFilters(); renderMapLegend(); updateMap(); renderHeat(); renderTable(); markTableSelection(false);
-      if (detailDirty) { detailDirty = false; renderDetail(); }
-    }, 700);
-  }
-
-  // ---- progress ----------------------------------------------------------------------------
-  function setProgress(text, frac) {
-    $("#progress-text").innerHTML = text;
-    $("#progress-bar").style.width = `${Math.round(Math.max(0, Math.min(1, frac)) * 100)}%`;
-  }
-  function showError(msg) { const el = $("#error"); el.textContent = msg; el.hidden = !msg; }
-
-  // ---- fetching ------------------------------------------------------------------------------
-  const locName = (v) => {
-    if (typeof v === "string") return v.trim();
-    if (v && typeof v === "object") return (v.en || "").trim() || (v.th || "").trim();
-    return "";
-  };
-  function parseCatalogue(data, kind) {
-    const out = new Map();
-    (Array.isArray(data) ? data : []).forEach((e) => {
-      const st = e.station || {};
-      if (st.id === undefined || st.id === null) return;
-      const lat = num(st.tele_station_lat), lon = num(st.tele_station_long);
-      if (!has(lat) || !has(lon)) return;
-      const id = String(st.id);
-      if (out.has(id)) return;
-      out.set(id, {
-        id, kind, k: kind + id, lat, lon,
-        code: (st.tele_station_oldcode || "").trim(), name: locName(st.tele_station_name),
-        agency: locName((e.agency || {}).agency_shortname), prov: locName((e.geocode || {}).province_name), basin: locName((e.basin || {}).basin_name),
-      });
-    });
-    return [...out.values()];
-  }
-  async function ensureCatalogues(signal) {
-    if (!app.catalogue) {
-      setProgress("Loading the station lists…", 0.05);
-      const [w, r] = await Promise.all([
-        getJSON("waterlevel", {}, { ttl: 15 * 60e3, signal }),
-        getJSON("rain_24h", {}, { ttl: 15 * 60e3, signal }),
-      ]);
-      app.catalogue = { w: parseCatalogue(w, "w"), r: parseCatalogue(r, "r") };
-    }
-    pickStations();
-  }
-  function pickStations() {
-    const P = app.proj;
-    app.stations = [...app.catalogue.w, ...app.catalogue.r].filter((s) => inAOI(s.lon, s.lat)).map((s) => {
-      const [x, y] = P.xy(s.lon, s.lat);
-      return { ...s, x, y };
-    });
-    app.byKey = new Map(app.stations.map((s) => [s.k, s]));
-    if (!state.sel || !app.byKey.has(state.sel)) {
-      const first = app.stations.find((s) => s.code === "C.2" && s.kind === "w") ||
-        app.stations.filter((s) => s.kind === "w").sort((a, b) => a.code.localeCompare(b.code))[0] || app.stations[0];
-      state.sel = first ? first.k : null;
-    }
-    buildDots();
-  }
-  function dateChunks(start, end) {
-    const out = [];
-    for (let a = start; a <= end; a += CHUNK_DAYS * DAY) out.push([a, Math.min(end, a + (CHUNK_DAYS - 1) * DAY)]);
-    return out;
-  }
-  function monthsBetween(start, end) {
-    const out = [], a = new Date(start), b = new Date(end);
-    for (let y = a.getUTCFullYear(), m = a.getUTCMonth(); y < b.getUTCFullYear() || (y === b.getUTCFullYear() && m <= b.getUTCMonth()); m === 11 ? (y++, m = 0) : m++) {
-      out.push({ year: y, month: m + 1, end: Date.UTC(y, m + 1, 0) });
-    }
-    return out;
-  }
-  const stage = (name, done, total, extra = "") =>
-    setProgress(`<b>${name}</b>: ${fmtInt(done)} of ${fmtInt(total)}${extra}`, total ? done / total : 1);
-
-  async function fetchWaterLevels(run) {
-    const list = app.stations.filter((s) => s.kind === "w"), sWL = series("wl"), sQ = series("q"), chunks = dateChunks(run.start, run.end);
-    let done = 0, failed = 0;
-    stage("Water level and discharge", 0, list.length);
-    await pool(list, async (s) => {
-      const lv = new Float32Array(sWL.n).fill(NaN), qv = new Float32Array(sWL.n).fill(NaN);
-      let error = false;
-      for (const [a, b] of chunks) {
-        let data;
-        try {
-          data = await getJSON("waterlevel_graph", { station_id: s.id, station_type: "tele_waterlevel", start_date: isoDate(a), end_date: isoDate(b) },
-            { ttl: ttlFor(b), signal: run.ctrl.signal });
-        } catch (e) { if (e.name === "AbortError") throw e; error = true; continue; }
-        for (const p of (data && data.graph_data) || []) {
-          const t = parseStamp(p.datetime);
-          if (!has(t) || t % HOUR) continue; // 10-minute stations: keep the on-the-hour reading
-          const i = (t - sWL.t0) / HOUR;
-          if (i < 0 || i >= sWL.n) continue;
-          const v = num(p.value), d = num(p.discharge);
-          if (has(v) && !has(lv[i])) lv[i] = v;
-          if (has(d) && d >= 0 && !has(qv[i])) qv[i] = d;
-        }
-      }
-      if (run.ctrl.signal.aborted) return;
-      if (error) failed++;
-      sWL.rows.set(s.k, summarise("wl", lv, error ? ["download failed for part of the period"] : []));
-      if (qv.some(has)) sQ.rows.set(s.k, summarise("q", qv));
-    }, run.ctrl.signal, (s) => { done++; stage("Water level and discharge", done, list.length, failed ? ` · ${failed} failed` : ""); scheduleRender(s.k); });
-  }
-  async function fetchRainDaily(run) {
-    const list = app.stations.filter((s) => s.kind === "r" && !series("rain").rows.has(s.k)), ser = series("rain");
-    const months = monthsBetween(run.start, run.end);
-    let done = 0, failed = 0;
-    stage("Rain daily", 0, list.length);
-    await pool(list, async (s) => {
-      const { vals, error } = await rainDailyValues(s, ser, months, run.ctrl.signal);
-      if (run.ctrl.signal.aborted) return;
-      if (error) failed++;
-      ser.rows.set(s.k, summarise("rain", vals, error ? ["download failed for part of the period"] : []));
-    }, run.ctrl.signal, (s) => { done++; stage("Rain daily", done, list.length, failed ? ` · ${failed} failed` : ""); scheduleRender(s.k); });
-  }
-  async function rainDailyValues(s, ser, months, signal) {
-    const vals = new Float32Array(ser.n).fill(NaN);
-    let error = false;
-    for (const mo of months) {
-      let data;
-      try {
-        data = await getJSON("rain_monthly_graph", { station_id: s.id, month: mo.month, year: mo.year }, { ttl: ttlFor(mo.end), signal });
-      } catch (e) { if (e.name === "AbortError") throw e; error = true; continue; }
-      for (const p of Array.isArray(data) ? data : []) {
-        const i = Math.round((parseStamp(p.rainfall_datetime) - ser.t0) / DAY), v = num(p.rainfall_value);
-        if (i >= 0 && i < ser.n && has(v) && v >= 0) vals[i] = v;
-      }
-    }
-    return { vals, error };
-  }
-  function rainHourlySeries() {
-    const now = Math.floor(thaiNow() / HOUR) * HOUR, t0 = thaiToday() - DAY;
-    const ser = series("rainh");
-    if (ser && ser.t0 === t0 && ser.n === (now - t0) / HOUR + 1) return ser;
-    return (app.series.rainh = newSeries(t0, 60, (now - t0) / HOUR + 1));
-  }
-  async function rainHourlyValues(s, ser, signal) {
-    const vals = new Float32Array(ser.n).fill(NaN);
-    const data = await getJSON("rain_24h_graph", { station_id: s.id }, { ttl: 10 * 60e3, signal });
-    for (const p of Array.isArray(data) ? data : []) {
-      const i = Math.round((parseStamp(p.rainfall_datetime) - ser.t0) / HOUR), v = num(p.rainfall_value);
-      if (i >= 0 && i < ser.n && has(v) && v >= 0) vals[i] = v;
-    }
-    return vals;
-  }
-  async function fetchRainHourly(signal) {
-    const ser = rainHourlySeries(), list = app.stations.filter((s) => s.kind === "r" && !ser.rows.has(s.k));
-    let done = 0;
-    stage("Rain hourly", 0, list.length);
-    await pool(list, async (s) => {
-      try { ser.rows.set(s.k, summarise("rainh", await rainHourlyValues(s, ser, signal))); }
-      catch (e) { if (e.name === "AbortError") throw e; ser.rows.set(s.k, summarise("rainh", new Float32Array(ser.n).fill(NaN), ["download failed"])); }
-    }, signal, (s) => { done++; stage("Rain hourly", done, list.length); scheduleRender(s.k); });
-  }
-
-  // Rain is about nine requests in ten, so it loads only when someone looks at it: a rain
-  // tab loads every gauge, and opening one gauge loads just that gauge.
-  const rainLoaded = (v) => {
-    const ser = v === "rainh" ? rainHourlySeries() : series(v);
-    return !!ser && app.stations.every((s) => s.kind !== "r" || ser.rows.has(s.k));
-  };
-  function wantRain(v) {
-    app.want[v] = true;
-    if (!app.run || !app.run.done) return; // the running fetch takes it up after water level
-    if (app.extra || rainLoaded(v)) return;
-    const run = app.run, ctrl = new AbortController();
-    run.ctrl.signal.addEventListener("abort", () => ctrl.abort(), { once: true });
-    app.extra = ctrl;
-    (v === "rain" ? fetchRainDaily({ ...run, ctrl }) : fetchRainHourly(ctrl.signal))
-      .then(() => finished())
-      .catch((e) => { if (e.name !== "AbortError") { showError(friendlyError(e)); setProgress("Stopped.", 0); } })
-      .finally(() => {
-        if (app.extra === ctrl) app.extra = null;
-        const next = ["rain", "rainh"].find((w) => app.want[w] && !rainLoaded(w));
-        if (next && !ctrl.signal.aborted) wantRain(next);
-      });
-  }
-  const oneRain = new Set();
-  async function fetchOneRain(s) {
-    if (oneRain.has(s.k) || !app.run) return;
-    oneRain.add(s.k);
-    try {
-      const daily = series("rain");
-      if (daily && !daily.rows.has(s.k)) {
-        const { vals, error } = await rainDailyValues(s, daily, monthsBetween(app.run.start, app.run.end));
-        if (series("rain") === daily && !error) daily.rows.set(s.k, summarise("rain", vals));
-      }
-      const hourly = rainHourlySeries();
-      if (!hourly.rows.has(s.k)) hourly.rows.set(s.k, summarise("rainh", await rainHourlyValues(s, hourly)));
-      scheduleRender(s.k);
-    } catch (e) { /* the charts keep their loading note; a rain tab loads every gauge */ }
-    finally { oneRain.delete(s.k); }
-  }
-  const friendlyError = (e) => (e.status === 429
-    ? "ThaiWater is limiting requests right now (HTTP 429). Wait a minute, then press Fetch data again."
-    : `ThaiWater did not answer: ${e.message}. Check your connection and press Fetch data again.`);
-  function finished() {
-    const t = new Date(thaiNow());
-    app.lastLoaded = `${pad(t.getUTCHours())}:${pad(t.getUTCMinutes())}`;
-    const nW = app.stations.filter((s) => s.kind === "w").length, nR = app.stations.length - nW;
-    const rainNote = rainLoaded("rain") || rainLoaded("rainh") ? "" : " Rainfall loads when you open Rain daily or Rain hourly, or click a rain gauge.";
-    setProgress(`<b>Up to date</b>: ${fmtInt(nW)} water level stations and ${fmtInt(nR)} rain gauges, loaded at ${app.lastLoaded} Thai time.${rainNote}`, 1);
-    renderAll();
-  }
-
-  async function fetchAll() {
-    showError("");
-    let start = parseDate($("#d-start").value), end = parseDate($("#d-end").value);
-    const today = thaiToday();
-    if (!has(start) || !has(end)) { showError("Pick a start and an end date."); return; }
-    if (end > today) end = today;
-    if (start > end) { showError("The start date must be on or before the end date."); return; }
-    if (app.catalogue && (app.want.rain || state.v === "rain")) {
-      const nR = app.stations.filter((s) => s.kind === "r").length, months = monthsBetween(start, end).length;
-      if (nR * months > BIG_JOB && !window.confirm(`This period needs about ${fmtInt(nR * months)} rainfall requests to ThaiWater and may take a long time. Continue?`)) return;
-    }
-    if (app.run) app.run.ctrl.abort();
-    if (app.extra) { app.extra.abort(); app.extra = null; }
-    const run = (app.run = { ctrl: new AbortController(), start, end, done: false });
-    const lastHour = Math.min(end + 23 * HOUR, Math.floor(thaiNow() / HOUR) * HOUR);
-    app.series.wl = newSeries(start, 60, Math.floor((lastHour - start) / HOUR) + 1);
-    app.series.q = newSeries(start, 60, app.series.wl.n);
-    app.series.rain = newSeries(start, 1440, Math.round((end - start) / DAY) + 1);
-    renderAll();
-    try {
-      await ensureCatalogues(run.ctrl.signal);
-      renderAll();
-      const wantDaily = () => app.want.rain || state.v === "rain", wantHourly = () => app.want.rainh || state.v === "rainh";
-      if (state.v === "rain") { await fetchRainDaily(run); await fetchWaterLevels(run); } else { await fetchWaterLevels(run); if (wantDaily()) await fetchRainDaily(run); }
-      if (wantHourly() && !rainLoaded("rainh")) await fetchRainHourly(run.ctrl.signal);
-      if (wantDaily() && !rainLoaded("rain")) await fetchRainDaily(run); // opened while hourly rain loaded
-      run.done = true;
-      if (app.run === run) finished();
-    } catch (e) {
-      run.done = true;
-      if (e.name === "AbortError") return;
-      showError(friendlyError(e));
-      setProgress("Stopped.", 0);
-    }
   }
 
   // ---- CSV export -------------------------------------------------------------------------
@@ -1127,7 +733,7 @@
   function saveWide() {
     const v = state.v, ser = series(v), m = VARS[v];
     const keys = sortedForTable().filter((k) => { const r = rowOf(v, k); return r && r.count; });
-    if (!ser || !keys.length) { showError("Nothing to save yet: no station in this view has readings."); return; }
+    if (!ser || !keys.length) return;
     const sts = keys.map((k) => app.byKey.get(k)), cols = keys.map((k) => rowOf(v, k).v);
     let last = ser.n - 1;
     while (last > 0 && !cols.some((c) => has(c[last]))) last--;
@@ -1175,29 +781,32 @@
     applyZoom();
   }
 
-  // ---- controls ---------------------------------------------------------------------------
-  function setRange(days) {
-    const end = thaiToday();
-    $("#d-end").value = isoDate(end);
-    $("#d-start").value = isoDate(end - days * DAY);
-  }
-  ["#d-start", "#d-end"].forEach((id) => { $(id).max = isoDate(thaiToday()); $(id).min = "2000-01-01"; });
-  $("#presets").addEventListener("click", (e) => {
-    const b = e.target.closest("button[data-days]");
-    if (b) setRange(+b.dataset.days); // fills the dates; Fetch data starts the download
-  });
-  $("#fetch").addEventListener("click", fetchAll);
-  $("#clear-cache").addEventListener("click", async (e) => {
-    e.preventDefault();
-    await cache.clear();
-    setProgress("Cache cleared. The next fetch downloads everything fresh.", 0);
-  });
-
   // ---- start ----------------------------------------------------------------------------------
-  setRange(30);
+  function loadDataset(D) {
+    app.stations = D.stations.map(([id, kind, code, name, agency, prov, basin, lat, lon]) => {
+      const [x, y] = app.proj.xy(lon, lat);
+      return { id, kind, k: kind + id, code, name, agency, prov, basin, lat, lon, x, y };
+    });
+    app.byKey = new Map(app.stations.map((s) => [s.k, s]));
+    for (const v of ["wl", "q", "rain"]) {
+      const src = D.series[v], ser = (app.series[v] = newSeries(parseStamp(src.t0), src.step, src.n));
+      for (const [k, vals] of Object.entries(src.values)) ser.rows.set(k, summarise(v, Float32Array.from(vals, (x) => (x === null ? NaN : x))));
+    }
+    // A station with no readings at all still gets a row, so it shows as Sparse at 0%.
+    app.stations.forEach((s) => {
+      const ser = series(s.kind === "r" ? "rain" : "wl");
+      if (!ser.rows.has(s.k)) ser.rows.set(s.k, summarise(s.kind === "r" ? "rain" : "wl", new Float32Array(ser.n).fill(NaN)));
+    });
+    const first = app.stations.find((s) => s.code === "C.2" && s.kind === "w") || app.stations.find((s) => s.kind === "w") || app.stations[0];
+    state.sel = first ? first.k : null;
+    const dl = $("#downloaded");
+    if (dl) dl.textContent = fmtTime(parseStamp(D.downloaded), true);
+    buildDots();
+  }
   setAOI(window.DEFAULT_AOI);
+  loadDataset(window.DATASET);
   renderAll();
-  fetchAll();
+
 
   let raf = 0, lastW = 0;
   const onResize = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { applyZoom(); renderDetail(); renderHeat(); }); };

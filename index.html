@@ -15,7 +15,7 @@
   <header class="top">
     <div class="top-text">
       <h1>Thai Hydro Watch</h1>
-      <p class="sub" id="subtitle">Live water level, discharge and rainfall from the ThaiWater network of the Hydro-Informatics Institute (HII), for the stations inside your area of interest.</p>
+      <p class="sub" id="subtitle">Water level, discharge and rainfall from the ThaiWater network of the Hydro-Informatics Institute (HII), for the stations inside the study area.</p>
     </div>
     <details class="about">
       <summary class="btn"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.2v4M8 4.8v.1"/></svg>About &amp; copyright</summary>
@@ -34,29 +34,6 @@
       </div>
     </details>
   </header>
-
-  <section class="card databar" aria-label="Data to fetch">
-    <div class="field">
-      <span class="lbl">Period, Thai time</span>
-      <div class="row">
-        <input type="date" id="d-start" aria-label="Start date">
-        <span aria-hidden="true">to</span>
-        <input type="date" id="d-end" aria-label="End date">
-        <div class="seg" id="presets">
-          <button type="button" data-days="7">7 days</button>
-          <button type="button" data-days="30">30 days</button>
-          <button type="button" data-days="90">90 days</button>
-        </div>
-        <button type="button" class="btn primary" id="fetch">Fetch data</button>
-      </div>
-    </div>
-    <div class="progress" aria-live="polite">
-      <span class="text" id="progress-text">Starting&hellip;</span>
-      <div class="bar"><i id="progress-bar"></i></div>
-      <span class="note" id="throttle" hidden></span>
-      <span class="error" id="error" hidden></span>
-    </div>
-  </section>
 
   <nav class="filters" aria-label="View">
     <div class="group"><span class="lbl">Variable</span><div class="seg" id="f-var"></div></div>
@@ -117,17 +94,17 @@
   </section>
 
   <footer>
-    <p><b>Source.</b> ThaiWater Open API of the Hydro-Informatics Institute (<a href="https://www.thaiwater.net/" target="_blank" rel="noopener">thaiwater.net</a>), fetched live by your browser. Values are as published, with no cleaning. Water level is metres above mean sea level, so Bangkok canals can sit below zero. Stations that report every 10 minutes are sampled on the hour to match the hourly stations. Times are Thai local time (UTC+7). Map data made with Natural Earth.</p>
-    <p><b>What ThaiWater publishes.</b> Water level and discharge: hourly, from about 2020. Rainfall: daily totals for any date, but hourly values only from 00:00 yesterday to now. DWR gauges may count the rain day from 07:00 rather than midnight.</p>
-    <p><b>Loading order.</b> ThaiWater limits how fast one browser may ask for data, so this page paces its requests and pauses on its own if ThaiWater says "slow down". Fetch data loads water level and discharge. Rainfall, which needs about ten times as many requests, loads when you open Rain daily or Rain hourly, or click a rain gauge.</p>
-    <p><b>How stations are flagged.</b> Possible spike: water level more than 1 m from its 7-hour running median, or discharge more than half its running median and 10 m³/s away. Stuck: the same water level for 72 hours or more. Rainfall: all zeros over 20 or more wet-season days (May to October), a day of 200 mm or more, or an hour of 100 mm or more. A flag means "look at this", not "this is wrong"; real floods and pumping can trip it.</p>
-    <p><b>Saved CSV files</b> use the station-column layout: a station count, then rows for station name, variable, lat and lon, then one row per time step. Blank cells have no reading. Responses are cached in this browser for up to a week; <a href="#" id="clear-cache">clear the cache</a> to force fresh downloads.</p>
+    <p><b>Source.</b> ThaiWater Open API of the Hydro-Informatics Institute (<a href="https://www.thaiwater.net/" target="_blank" rel="noopener">thaiwater.net</a>), downloaded <span id="downloaded">3 Oct 2026</span>. Values are as published, with no cleaning. Water level is metres above mean sea level, so Bangkok canals can sit below zero. Stations that report every 10 minutes are sampled on the hour to match the hourly stations. Daily rainfall is the provider's own total; DWR gauges may count the rain day from 07:00 rather than midnight. Times are Thai local time (UTC+7). Map data made with Natural Earth.</p>
+    <p><b>How stations are flagged.</b> Possible spike: water level more than 1 m from its 7-hour running median, or discharge more than half its running median and 10 m³/s away. Stuck: the same water level for 72 hours or more. Rainfall: all zeros over 20 or more wet-season days (May to October), or a day of 200 mm or more. A flag means "look at this", not "this is wrong"; real floods and pumping can trip it.</p>
+    <p><b>Saved CSV files</b> use the station-column layout: a station count, then rows for station name, variable, lat and lon, then one row per time step. Blank cells have no reading.</p>
+    <!--online--><p><b>Share it.</b> <a href="share/thai-hydro-watch.html" download>Download this page as a single file</a> (3 MB, data included) to e-mail it or open it without internet.</p><!--/online-->
     <p class="copyright">&copy; 2026 Nguyen Xuan TINH (Ph.D.), Nippon Koei Co., Ltd., Water Resources &amp; Energy Dept. All rights reserved. Contact: <a href="mailto:tinh-ng@n-koei.jp">tinh-ng@n-koei.jp</a></p>
   </footer>
 </div>
 
 <script src="data/basemap.js"></script>
 <script src="data/aoi.js"></script>
+<script src="data/dataset.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>
